@@ -26,7 +26,12 @@ cd "$APP_DIR"
 
 printf 'Installing Termux PHP, Composer, and curl packages...\n'
 pkg update -y
+pkg upgrade -y
 pkg install -y php composer curl
+
+if ! php -v >/dev/null 2>&1; then
+    die "PHP cannot start. Termux packages may be out of sync; run 'pkg update -y && pkg upgrade -y' and then retry this setup."
+fi
 
 for extension in pdo_sqlite sqlite3 mbstring openssl tokenizer xml ctype json fileinfo dom; do
     php -m | grep -qi "^${extension}$" || die "PHP extension '$extension' is missing. Check the Termux PHP package and retry."

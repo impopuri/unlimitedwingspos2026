@@ -23,7 +23,19 @@ cd ~/etivacwings
 bash setup-termux.sh
 ```
 
-Install Termux from a current, supported source and open Termux before running setup. The setup installs PHP, Composer, and curl; installs the locked Composer dependencies; creates `.env` and an SQLite database only when missing; generates the app key only when missing; applies outstanding migrations; runs the idempotent seeders; and caches routes and compiled views for faster page startup. It does not drop or reset existing tables or sales.
+Install Termux from a current, supported source and open Termux before running setup. The setup updates and upgrades Termux packages first (to keep native libraries such as PHP and libcurl compatible), installs PHP, Composer, and curl, installs the locked Composer dependencies, creates `.env` and an SQLite database only when missing, generates the app key only when missing, applies outstanding migrations, runs the idempotent seeders, and caches routes and compiled views for faster page startup. It does not drop or reset existing tables or sales.
+
+If PHP reports a linker error or the setup says an extension is missing, update Termux packages and verify PHP before retrying:
+
+```bash
+pkg update -y
+pkg upgrade -y
+pkg install -y php composer curl
+php -v
+php -m | grep -Ei 'pdo_sqlite|sqlite3'
+```
+
+Once `php -v` works and both SQLite modules appear, retry `bash setup-termux.sh`. The mirror-selection notice is informational if Termux successfully selects a reachable mirror; use `termux-change-repo` only if package downloads actually fail.
 
 After setup finishes, start the POS each day with:
 
