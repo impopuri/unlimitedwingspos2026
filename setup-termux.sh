@@ -25,12 +25,12 @@ esac
 cd "$APP_DIR"
 
 printf 'Installing Termux PHP, Composer, and curl packages...\n'
-pkg update -y
-pkg upgrade -y
-pkg install -y php composer curl
+apt update
+apt full-upgrade -y
+apt install -y php composer curl
 
 if ! php -v >/dev/null 2>&1; then
-    die "PHP cannot start. Termux packages may be out of sync; run 'pkg update -y && pkg upgrade -y' and then retry this setup."
+    die "PHP cannot start. Termux packages may be out of sync; run 'apt update && apt full-upgrade -y' and then retry this setup."
 fi
 
 for extension in pdo_sqlite sqlite3 mbstring openssl tokenizer xml ctype json fileinfo dom; do
@@ -68,8 +68,9 @@ if ! grep -q '^APP_KEY=base64:' .env; then
     php artisan key:generate --force --no-interaction
 fi
 
-php artisan optimize:clear
+php artisan config:clear
 php artisan migrate --seed --force
+php artisan optimize:clear
 php artisan route:cache
 php artisan view:cache
 

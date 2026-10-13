@@ -23,19 +23,21 @@ cd ~/etivacwings
 bash setup-termux.sh
 ```
 
-Install Termux from a current, supported source and open Termux before running setup. The setup updates and upgrades Termux packages first (to keep native libraries such as PHP and libcurl compatible), installs PHP, Composer, and curl, installs the locked Composer dependencies, creates `.env` and an SQLite database only when missing, generates the app key only when missing, applies outstanding migrations, runs the idempotent seeders, and caches routes and compiled views for faster page startup. It does not drop or reset existing tables or sales.
+Install Termux from a current, supported source and open Termux before running setup. The setup updates and upgrades Termux packages first (to keep native libraries such as PHP and libcurl compatible), installs PHP, Composer, and curl, installs the locked Composer dependencies, creates `.env` and an SQLite database only when missing, generates the app key only when missing, clears stale configuration, applies outstanding migrations and idempotent seeders, then clears application caches and caches routes and compiled views for faster page startup. Migrations intentionally run before clearing the application cache because the database cache table is created by a migration. Setup does not drop or reset existing tables or sales.
 
-If PHP reports a linker error or the setup says an extension is missing, update Termux packages and verify PHP before retrying:
+If `pkg update` or `pkg upgrade` fails with `CANNOT LINK EXECUTABLE` / `SSL_set_quic_tls_early_data_enabled`, the Termux packages are partially upgraded and the `pkg` wrapper cannot start because it uses the broken `curl`. Use `apt` directly to repair the package set:
 
 ```bash
-pkg update -y
-pkg upgrade -y
-pkg install -y php composer curl
+apt update
+apt full-upgrade -y
+apt install -y php composer curl
 php -v
 php -m | grep -Ei 'pdo_sqlite|sqlite3'
 ```
 
-Once `php -v` works and both SQLite modules appear, retry `bash setup-termux.sh`. The mirror-selection notice is informational if Termux successfully selects a reachable mirror; use `termux-change-repo` only if package downloads actually fail.
+Run these commands one at a time in Termux and wait for each to finish. If `apt update` reports download or repository errors, run `termux-change-repo`, select a reachable official Termux main repository mirror, and retry the `apt` commands. The “No mirror or mirror group selected” notice by itself is not the PHP linker error; the `CANNOT LINK EXECUTABLE` message is the failure to resolve first.
+
+Once `php -v` works and both SQLite modules appear, retry `bash setup-termux.sh`. If direct `apt` also cannot run, do not delete the project or database. Back up `~/etivacwings` (especially `database/database.sqlite`, `.env`, and `storage/app/public`) to shared storage before attempting any Termux reinstall; reinstalling Termux can erase its private home directory.
 
 After setup finishes, start the POS each day with:
 
@@ -44,7 +46,9 @@ cd ~/etivacwings
 bash start-termux.sh
 ```
 
-The daily start does not reinstall packages or rerun migrations. The default address is `http://127.0.0.1:8002/posetivacwingspos`; when available, the script opens it in the tablet browser. Keep Termux open while using the POS. Press Ctrl+C in Termux to stop it.
+The daily start does not reinstall packages or rerun migrations. It listens on the tablet's Wi-Fi interface and prints both the tablet-local address and a detected **For other devices on the same Wi-Fi** link, for example `http://192.168.1.25:8002/posetivacwingspos`. Open the printed Wi-Fi link on each phone/tablet/computer connected to the same Wi-Fi network. When available, the script opens the local address in the tablet browser. Keep Termux open while using the POS. Press Ctrl+C in Termux to stop it.
+
+If the script cannot detect the tablet IP, connect the tablet to Wi-Fi and check **Android Settings → About tablet → Status → IP address**, then open `http://<that-ip>:8002/posetivacwingspos` on the other device. If the older local-only server is still running, stop it with Ctrl+C and start again using the updated `start-termux.sh`. The network link is for a trusted private Wi-Fi network only; do not expose this server to the public internet. To keep the server tablet-only, start with `HOST=127.0.0.1 bash start-termux.sh`.
 
 ### Updating the tablet with a newer project version
 
@@ -64,7 +68,7 @@ bash start-termux.sh
 
 This keeps the tablet's `.env`, SQLite sales database, and uploaded receipt assets instead of replacing them with the desktop copies. If the update changes `composer.json` or `composer.lock`, run `bash setup-termux.sh` after copying the update so Composer dependencies are installed as well. Never reset or delete the tablet database during an update.
 
-The server listens only on the tablet by default. To make it available to other devices on a trusted private Wi-Fi network, start it with `HOST=0.0.0.0 bash start-termux.sh` and open `http://<tablet-ip>:8002/posetivacwingspos` on the other device. Set `APP_URL=http://<tablet-ip>:8002` in `~/etivacwings/.env` using the tablet's actual Wi-Fi IP first so receipt/logo assets point to the tablet rather than the other device's localhost. Do not set `APP_URL` to `0.0.0.0`, and do not expose this local Laravel server to the public internet. The seeded local demo accounts use the passwords shown above; change them before operational use.
+The daily start uses the tablet's current Wi-Fi IP for generated asset URLs automatically. For a Wi-Fi address that changes often, no manual `.env` edit is needed. Never set `APP_URL` to `0.0.0.0`. The seeded local demo accounts use the passwords shown above; change them before operational use.
 
 ## Development accounts
 
