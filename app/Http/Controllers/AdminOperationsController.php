@@ -612,9 +612,16 @@ class AdminOperationsController extends Controller
                     ->whereColumn('order_items.order_id', 'orders.id')->where('order_items.product_id', $data['product_id']));
             })
             ->when(isset($data['flavor_id']), function ($query) use ($data): void {
-                $query->whereExists(fn ($subquery) => $subquery->selectRaw('1')->from('order_items')
-                    ->join('order_item_flavors', 'order_item_flavors.order_item_id', '=', 'order_items.id')
-                    ->whereColumn('order_items.order_id', 'orders.id')->where('order_item_flavors.flavor_id', $data['flavor_id']));
+                $query->where(function ($flavors) use ($data): void {
+                    $flavors->whereExists(fn ($subquery) => $subquery->selectRaw('1')->from('order_items')
+                        ->join('order_item_flavors', 'order_item_flavors.order_item_id', '=', 'order_items.id')
+                        ->whereColumn('order_items.order_id', 'orders.id')
+                        ->where('order_item_flavors.flavor_id', $data['flavor_id']))
+                        ->orWhereExists(fn ($subquery) => $subquery->selectRaw('1')->from('unli_round_flavors')
+                            ->join('unli_rounds', 'unli_rounds.id', '=', 'unli_round_flavors.unli_round_id')
+                            ->whereColumn('unli_rounds.unli_session_id', 'orders.unli_session_id')
+                            ->where('unli_round_flavors.flavor_id', $data['flavor_id']));
+                });
             });
         $orderIds = (clone $orders)->pluck('id');
         $transactions = (clone $orders)
@@ -661,15 +668,37 @@ class AdminOperationsController extends Controller
             ]);
         $flavorSales = DB::table('order_item_flavors')
             ->join('order_items', 'order_items.id', '=', 'order_item_flavors.order_item_id')
+            ->join('products', 'products.id', '=', 'order_items.product_id')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->whereIn('orders.id', $orderIds)->whereIn('orders.status', ['paid', 'partially_refunded', 'refunded'])
             ->groupBy('order_item_flavors.flavor_name')
-            ->orderByDesc(DB::raw('SUM(order_item_flavors.quantity)'))
-            ->limit(20)
             ->get([
                 'order_item_flavors.flavor_name',
-                DB::raw('SUM(order_item_flavors.quantity) as quantity_sold'),
+                DB::raw('SUM(products.wing_count * order_item_flavors.quantity) as quantity_sold'),
             ]);
+        $unliFlavorSales = DB::table('unli_round_flavors')
+            ->join('unli_rounds', 'unli_rounds.id', '=', 'unli_round_flavors.unli_round_id')
+            ->join('orders', 'orders.unli_session_id', '=', 'unli_rounds.unli_session_id')
+            ->whereIn('orders.id', $orderIds)
+            ->whereIn('orders.status', ['paid', 'partially_refunded', 'refunded'])
+            ->groupBy('unli_round_flavors.flavor_name')
+            ->get([
+                'unli_round_flavors.flavor_name',
+                DB::raw('SUM(unli_round_flavors.quantity) as wings_sold'),
+            ]);
+        $flavorTotals = $flavorSales->keyBy('flavor_name');
+        foreach ($unliFlavorSales as $unliFlavor) {
+            $flavor = $flavorTotals->get($unliFlavor->flavor_name);
+            if ($flavor) {
+                $flavor->quantity_sold = (int) $flavor->quantity_sold + (int) $unliFlavor->wings_sold;
+            } else {
+                $flavorTotals->put($unliFlavor->flavor_name, (object) [
+                    'flavor_name' => $unliFlavor->flavor_name,
+                    'quantity_sold' => (int) $unliFlavor->wings_sold,
+                ]);
+            }
+        }
+        $flavorSales = $flavorTotals->sortByDesc('quantity_sold')->take(20)->values();
         $byCategory = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->leftJoin('products', 'products.id', '=', 'order_items.product_id')

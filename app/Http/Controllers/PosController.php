@@ -221,6 +221,9 @@ class PosController extends Controller
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+            DB::table('orders')->where('id', $orderId)->update([
+                'customer_order_number' => 'ORD-'.str_pad((string) $orderId, 6, '0', STR_PAD_LEFT),
+            ]);
 
             foreach ($products as [$product, $quantity, $allocations]) {
                 $itemId = DB::table('order_items')->insertGetId([
@@ -515,6 +518,9 @@ class PosController extends Controller
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+            DB::table('orders')->where('id', $orderId)->update([
+                'customer_order_number' => 'ORD-'.str_pad((string) $orderId, 6, '0', STR_PAD_LEFT),
+            ]);
             DB::table('order_items')->insert([
                 'order_id' => $orderId,
                 'product_id' => $active->package_product_id,
@@ -672,22 +678,48 @@ class PosController extends Controller
     public function orders(): JsonResponse
     {
         $columns = [
-            'orders.id', 'orders.order_number', 'orders.type', 'orders.status',
+            'orders.id', 'orders.customer_order_number', 'orders.order_number', 'orders.type', 'orders.status',
             'orders.total_cents', 'orders.created_at', 'users.name as cashier_name',
+            'dining_tables.label as table_label',
         ];
         $pendingOrders = DB::table('orders')
             ->join('users', 'users.id', '=', 'orders.cashier_id')
+            ->leftJoin('dining_tables', 'dining_tables.id', '=', 'orders.dining_table_id')
             ->where('orders.status', 'awaiting_payment')
             ->orderBy('orders.created_at')
             ->get($columns);
         $recentOrders = DB::table('orders')
             ->join('users', 'users.id', '=', 'orders.cashier_id')
+            ->leftJoin('dining_tables', 'dining_tables.id', '=', 'orders.dining_table_id')
             ->where('orders.status', '!=', 'awaiting_payment')
             ->orderByDesc('orders.created_at')
             ->limit(100)
             ->get($columns);
 
-        return response()->json(['orders' => $pendingOrders->concat($recentOrders)->values()]);
+        $orders = $pendingOrders->concat($recentOrders)->values()->map(function (object $order): object {
+            $order->customer_order_number ??= 'ORD-'.str_pad((string) $order->id, 6, '0', STR_PAD_LEFT);
+            $order->items = DB::table('order_items')
+                ->leftJoin('products', 'products.id', '=', 'order_items.product_id')
+                ->leftJoin('categories', 'categories.id', '=', 'products.category_id')
+                ->where('order_items.order_id', $order->id)
+                ->orderBy('order_items.id')
+                ->get([
+                    'order_items.product_name',
+                    'order_items.quantity',
+                    'categories.name as category_name',
+                    'categories.slug as category_slug',
+                ]);
+            $categories = $order->items->pluck('category_name')->filter()->unique()->values();
+            $order->order_type = $order->type === 'unliwings'
+                ? 'UNLI'
+                : ($categories->contains(fn (string $category): bool => mb_strtolower($category) === 'meals')
+                    ? 'RICE MEAL'
+                    : ($categories->first() ?? strtoupper(str_replace('_', ' ', $order->type))));
+
+            return $order;
+        });
+
+        return response()->json(['orders' => $orders]);
     }
 
     public function payOrder(Request $request, int $order): JsonResponse
@@ -728,6 +760,7 @@ class PosController extends Controller
             ->join('users', 'users.id', '=', 'orders.cashier_id')
             ->where('orders.id', $orderId)
             ->first(['orders.*', 'users.name as cashier_name']);
+        $order->customer_order_number ??= 'ORD-'.str_pad((string) $order->id, 6, '0', STR_PAD_LEFT);
         $order->items = DB::table('order_items')->where('order_id', $orderId)->get()->map(function ($item): object {
             $item->flavors = DB::table('order_item_flavors')->where('order_item_id', $item->id)->get();
 

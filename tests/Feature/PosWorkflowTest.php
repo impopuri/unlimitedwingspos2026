@@ -41,7 +41,10 @@ class PosWorkflowTest extends TestCase
         ];
 
         $first = $this->actingAs($cashier)->postJson('/posetivacwingspos/api/orders', $payload);
-        $first->assertCreated()->assertJsonPath('receipt.total_cents', 34900);
+        $first->assertCreated()
+            ->assertJsonPath('receipt.total_cents', 34900)
+            ->assertJsonPath('receipt.customer_order_number', 'ORD-000001');
+        $this->assertNotSame($first->json('receipt.customer_order_number'), $first->json('receipt.order_number'));
         $this->getJson('/posetivacwingspos/api/receipts/'.$first->json('receipt.id'))
             ->assertOk()
             ->assertJsonPath('receipt.order_number', $first->json('receipt.order_number'));
@@ -76,7 +79,9 @@ class PosWorkflowTest extends TestCase
         $this->getJson('/posetivacwingspos/api/orders')
             ->assertOk()
             ->assertJsonPath('orders.0.id', $orderId)
-            ->assertJsonPath('orders.0.status', 'awaiting_payment');
+            ->assertJsonPath('orders.0.status', 'awaiting_payment')
+            ->assertJsonPath('orders.0.customer_order_number', 'ORD-000001')
+            ->assertJsonPath('orders.0.order_type', 'RICE MEAL');
 
         $this->postJson("/posetivacwingspos/api/orders/{$orderId}/payment", [
             'payment_method' => 'cash',
@@ -380,10 +385,15 @@ class PosWorkflowTest extends TestCase
             'leftover_fee_cents' => $leftoverFee,
         ])->assertCreated()
             ->assertJsonPath('receipt.status', 'awaiting_payment')
+            ->assertJsonPath('receipt.customer_order_number', 'ORD-000001')
             ->assertJsonPath('receipt.leftover_fee_cents', $leftoverFee)
             ->assertJsonPath('receipt.total_cents', $package->price_cents + $leftoverFee);
 
         $orderId = $order->json('receipt.id');
+        $this->getJson('/posetivacwingspos/api/orders')
+            ->assertOk()
+            ->assertJsonPath('orders.0.order_type', 'UNLI')
+            ->assertJsonPath('orders.0.table_label', 'Table 1');
         $this->postJson("/posetivacwingspos/api/orders/{$orderId}/payment", [
             'payment_method' => 'cash',
             'amount_paid_cents' => $package->price_cents + $leftoverFee,
@@ -1089,6 +1099,47 @@ class PosWorkflowTest extends TestCase
         $this->actingAs($cashier)->getJson('/posetivacwingspos/api/cash-drawer')
             ->assertOk()
             ->assertJsonPath('expected_closing_cash_cents', 16900);
+    }
+
+    public function test_sales_report_counts_flavor_wings_for_unli_and_regular_orders(): void
+    {
+        $cashier = User::where('role', 'cashier')->firstOrFail();
+        $admin = User::where('role', 'superadmin')->firstOrFail();
+        $flavorId = DB::table('flavors')->where('name', 'Buffalo')->value('id');
+        $tableId = DB::table('dining_tables')->where('label', 'Table 1')->value('id');
+        $package = DB::table('products')->where('sku', 'UNLI-C')->firstOrFail();
+        $session = $this->actingAs($cashier)->postJson('/posetivacwingspos/api/unli-sessions', [
+            'table_id' => $tableId,
+            'package_id' => $package->id,
+            'paid_sets' => 1,
+        ])->assertCreated()->json('session');
+        $this->postJson("/posetivacwingspos/api/unli-sessions/{$session['id']}/rounds", [
+            'idempotency_key' => 'af2440f7-8429-4c3d-9fa7-704f2d7f0180',
+            'flavors' => [['flavor_id' => $flavorId, 'quantity' => 8]],
+        ])->assertOk();
+        $this->postJson("/posetivacwingspos/api/unli-sessions/{$session['id']}/billout", [
+            'idempotency_key' => '9df5b546-46f7-45a0-a57f-8d0504eb68ec',
+            'payment_method' => 'cash',
+            'amount_paid_cents' => $package->price_cents,
+        ])->assertCreated();
+        $platter = DB::table('products')->where('sku', 'PLATTER-12')->firstOrFail();
+        $this->postJson('/posetivacwingspos/api/orders', [
+            'idempotency_key' => '742deaf5-b55a-46e7-b93e-2ec1eaf3fd2c',
+            'type' => 'takeaway',
+            'payment_method' => 'cash',
+            'amount_paid_cents' => $platter->price_cents,
+            'items' => [[
+                'product_id' => $platter->id,
+                'quantity' => 1,
+                'flavors' => [['flavor_id' => $flavorId, 'quantity' => 1]],
+            ]],
+        ])->assertCreated();
+
+        $this->actingAs($admin)
+            ->getJson('/posetivacwingspos/api/admin/sales-report?from='.now()->toDateString().'&to='.now()->toDateString().'&flavor_id='.$flavorId)
+            ->assertOk()
+            ->assertJsonPath('flavors.0.flavor_name', 'Buffalo')
+            ->assertJsonPath('flavors.0.quantity_sold', 20);
     }
 
     public function test_expenses_can_be_updated_and_voided_with_audit_trail(): void

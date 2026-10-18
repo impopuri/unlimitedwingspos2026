@@ -8,18 +8,21 @@ function createIdempotencyUuid(){
     return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
-const baseNav=nav;
-function nav(){
+const baseNav=window.nav;
+window.nav=function(){
     baseNav();
     const voidsButton=[...document.querySelectorAll('#navigation button')].find(button=>button.getAttribute('onclick')==="showPage('voids')");
     if(voidsButton)voidsButton.textContent='VOIDS / HISTORY';
     if(state.user?.role==='cashier'||state.user?.role==='superadmin'){
-        document.getElementById('navigation').insertAdjacentHTML('beforeend',`<button class="${state.page==='orders'?'active':''}" onclick="showPage('orders')">ORDERS</button>`);
+        const ordersButton=`<button class="${state.page==='orders'?'active':''}" onclick="showPage('orders')">ORDERS</button>`;
+        const unliButton=[...document.querySelectorAll('#navigation button')].find(button=>button.getAttribute('onclick')==="showPage('unli')");
+        if(unliButton)unliButton.insertAdjacentHTML('afterend',ordersButton);
+        else document.getElementById('navigation').insertAdjacentHTML('beforeend',ordersButton);
     }
-}
+};
 
-const baseShowPage=showPage;
-function showPage(page){
+const baseShowPage=window.showPage;
+window.showPage=function(page){
     if(page==='orders'){
         state.page='orders';
         nav();
@@ -27,12 +30,13 @@ function showPage(page){
         return;
     }
     baseShowPage(page);
-}
+};
 
-const baseRenderPos=renderPos;
-function renderPos(){
+const baseRenderPos=window.renderPos;
+window.renderPos=function(){
     baseRenderPos();
     const screen=document.getElementById('screen');
+    screen.querySelector('.category-card')?.parentElement?.classList.add('pos-category-grid');
     screen.querySelectorAll('.cart-line').forEach((row,index)=>{
         const line=state.cart[index];
         if(!line)return;
@@ -49,8 +53,27 @@ function renderPos(){
     if(checkoutButton){
         checkoutButton.textContent='Confirm order';
         if(!screen.querySelector('[data-cancel-order]'))checkoutButton.insertAdjacentHTML('afterend',' <button class="btn secondary" data-cancel-order onclick="cancelPosOrder()">Cancel</button>');
-    }
+    };
 }
+
+const baseOpenTable=window.openTable;
+window.openTable=function(id){
+    baseOpenTable(id);
+    const input=document.getElementById('paid-sets');
+    if(!input)return;
+    const controls=document.createElement('div');
+    controls.className='paid-set-controls';
+    controls.innerHTML='<button type="button" class="btn secondary" aria-label="Decrease paid sets">−</button><button type="button" class="btn secondary" aria-label="Increase paid sets">+</button>';
+    const [minus,plus]=controls.querySelectorAll('button');
+    const adjust=delta=>{
+        input.value=String(Math.max(1,Math.min(50,(Number(input.value)||1)+delta)));
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+    };
+    minus.addEventListener('click',()=>adjust(-1));
+    plus.addEventListener('click',()=>adjust(1));
+    input.replaceWith(controls);
+    controls.prepend(input);
+};
 
 function adjustCart(index,delta){
     const line=state.cart[index];
@@ -109,7 +132,8 @@ async function loadOrders(){
         const data=await api('/api/orders');
         const pending=data.orders.filter(order=>order.status==='awaiting_payment');
         const completed=data.orders.filter(order=>order.status!=='awaiting_payment');
-        document.getElementById('screen').innerHTML=`<div class="page-head"><div><h1>Orders</h1><div class="muted">Confirmed orders from every device. Select an unpaid order when the customer is ready to pay.</div></div><button class="btn secondary" onclick="loadOrders()">Refresh</button></div><section class="panel"><h2>Awaiting payment · ${pending.length}</h2>${pending.map(order=>`<article class="detail-line order-row"><span><strong>${esc(order.order_number)}</strong><div class="muted">${esc(order.type)} · ${esc(order.cashier_name)} · ${manilaDateTime(order.created_at)}</div></span><span class="toolbar"><strong>${money(order.total_cents)}</strong><button class="btn" onclick="beginOrderPayment(${order.id})">Select order</button></span></article>`).join('')||'<div class="empty">No orders are waiting for payment.</div>'}</section><section class="panel" style="margin-top:16px"><h2>Recent orders</h2>${completed.map(order=>`<article class="detail-line order-row"><span><strong>${esc(order.order_number)}</strong><div class="muted">${esc(order.type)} · ${esc(order.cashier_name)} · ${manilaDateTime(order.created_at)}</div></span><span class="toolbar"><strong>${money(order.total_cents)}</strong><span class="status ${order.status==='paid'?'served':''}">${esc(order.status.replaceAll('_',' '))}</span>${['paid','partially_refunded','refunded'].includes(order.status)?`<button class="btn secondary small" onclick="openReceipt(${order.id})">Receipt</button>`:''}</span></article>`).join('')||'<div class="empty">No completed orders yet.</div>'}</section>`;
+        const row=order=>`<article class="detail-line order-row"><span><strong>Order #${esc(order.customer_order_number)} <span class="muted">· Transaction #${esc(order.order_number)}</span></strong><div class="muted">Type: ${esc(order.order_type)}${order.table_label?` · ${esc(order.table_label)}`:''} · ${esc(order.cashier_name)} · ${manilaDateTime(order.created_at)}</div><div class="muted">${order.items.map(item=>`${item.quantity} × ${esc(item.product_name)}`).join(' · ')}</div></span><span class="toolbar"><strong>${money(order.total_cents)}</strong>${order.status==='awaiting_payment'?`<button class="btn" onclick="beginOrderPayment(${order.id})">Select order</button>`:`<span class="status ${order.status==='paid'?'served':''}">${esc(order.status.replaceAll('_',' '))}</span>${['paid','partially_refunded','refunded'].includes(order.status)?`<button class="btn secondary small" onclick="openReceipt(${order.id})">Receipt</button>`:''}`}</span></article>`;
+        document.getElementById('screen').innerHTML=`<div class="page-head"><div><h1>Orders</h1><div class="muted">Confirmed orders from every device. Select an unpaid order when the customer is ready to pay.</div></div><button class="btn secondary" onclick="loadOrders()">Refresh</button></div><section class="panel"><h2>Awaiting payment · ${pending.length}</h2>${pending.map(row).join('')||'<div class="empty">No orders are waiting for payment.</div>'}</section><section class="panel" style="margin-top:16px"><h2>Recent orders</h2>${completed.map(row).join('')||'<div class="empty">No completed orders yet.</div>'}</section>`;
     }catch(error){notice(error.message,true)}
 }
 
@@ -140,12 +164,14 @@ async function completeOrderPayment(id){
     }catch(error){notice(error.message,true)}
 }
 
-const baseShowReceipt=showReceipt;
-function showReceipt(receipt){
+window.unliRoundText=round=>`Round ${round.round_number}:\n${(round.flavors||[]).map(flavor=>`${flavor.flavor_name} × ${flavor.quantity/4} order(s) (${flavor.quantity} wings)`).concat((round.included_items||[]).map(item=>`${item} × ${round.included_quantities?.[item]??1}`)).join('\n')||'No items'}${round.total_wings?`\n${round.total_wings} wings total`:''}`;
+const baseShowReceipt=window.showReceipt;
+window.showReceipt=function(receipt){
     baseShowReceipt(receipt);
     if(Number(receipt.leftover_fee_cents)>0){
         state.receiptText=state.receiptText.replace(/^TOTAL:.*$/m,`Leftover fee: ${money(receipt.leftover_fee_cents)}\nTOTAL: ${money(receipt.total_cents)}`);
     }
+    state.receiptText=state.receiptText.replace(`Receipt: ${receipt.order_number}`,`Order #: ${receipt.customer_order_number||`ORD-${String(receipt.id).padStart(6,'0')}`}\nTransaction #: ${receipt.order_number}`);
     for(const item of receipt.items||[]){
         const inline=item.flavors?.map(flavor=>`${flavor.flavor_name} × ${flavor.quantity} order`).join(', ');
         const vertical=item.flavors?.map(flavor=>`${flavor.flavor_name} × ${flavor.quantity} order`).join('\n   ');
@@ -154,10 +180,30 @@ function showReceipt(receipt){
     state.receiptText=state.receiptText.replace(/^Date: .*$/m,`Date: ${manilaDateTime(receipt.created_at)}`);
     const receiptText=document.querySelector('#receipt-paper > div');
     if(receiptText)receiptText.textContent=state.receiptText;
+};
+
+function adjustUnliFlavor(input,amount){
+    input.value=String(Math.max(0,Math.min(125,(Number(input.value)||0)+amount)));
+    input.dispatchEvent(new Event('input',{bubbles:true}));
 }
 
-const baseUpdateBilloutTotal=updateBilloutTotal;
-function updateBilloutTotal(){
+const baseSessionPanel=window.sessionPanel;
+window.sessionPanel=async function(id){
+    await baseSessionPanel(id);
+    for(const input of document.querySelectorAll('#round-flavors [data-round-qty]')){
+        const controls=document.createElement('div');
+        controls.className='round-quantity-controls';
+        controls.innerHTML='<button type="button" class="btn secondary small" aria-label="Decrease flavor orders">−</button><button type="button" class="btn secondary small" aria-label="Increase flavor orders">+</button>';
+        const [minus,plus]=controls.querySelectorAll('button');
+        minus.addEventListener('click',()=>adjustUnliFlavor(input,-1));
+        plus.addEventListener('click',()=>adjustUnliFlavor(input,1));
+        input.replaceWith(controls);
+        controls.prepend(input);
+    }
+};
+
+const baseUpdateBilloutTotal=window.updateBilloutTotal;
+window.updateBilloutTotal=function(){
     baseUpdateBilloutTotal();
     const bill=state.pendingBillout;
     if(!bill)return;
@@ -171,17 +217,17 @@ function updateBilloutTotal(){
     if(total)total.textContent=money(bill.total);
     const preview=document.querySelector('#bill-preview > div');
     if(preview)preview.textContent=state.receiptText;
-}
+};
 
-const baseRenderReceiptEditor=renderReceiptEditor;
-function renderReceiptEditor(){
+const baseRenderReceiptEditor=window.renderReceiptEditor;
+window.renderReceiptEditor=function(){
     baseRenderReceiptEditor();
     const screen=document.getElementById('screen');
     screen.querySelector('.panel')?.insertAdjacentHTML('beforeend','<section class="panel" style="margin-top:18px"><h2>Live preview</h2><div id="receipt-live-preview" class="receipt"></div></section>');
     document.getElementById('receipt-header')?.addEventListener('input',renderReceiptPreview);
     document.getElementById('receipt-footer')?.addEventListener('input',renderReceiptPreview);
     renderReceiptPreview();
-}
+};
 
 function renderReceiptPreview(){
     const preview=document.getElementById('receipt-live-preview');
@@ -192,8 +238,8 @@ function renderReceiptPreview(){
     preview.innerHTML=`<img src="/images/EWLOGO.png" alt="ETIVAC WINGS logo" style="display:block;width:34mm;height:auto;max-height:18mm;object-fit:contain;margin:0 auto 2mm"><div>${esc(content)}</div>${state.receiptSettings?.qr_url?`<img class="receipt-qr" src="${esc(state.receiptSettings.qr_url)}" alt="Survey QR code">`:''}`;
 }
 
-const baseRenderCashflow=renderCashflow;
-function renderCashflow(){
+const baseRenderCashflow=window.renderCashflow;
+window.renderCashflow=function(){
     baseRenderCashflow();
     const grid=document.querySelector('#screen > section.panel .grid');
     if(grid)grid.insertAdjacentHTML('beforeend',`<article class="panel"><div class="muted">Leftover fees</div><h2>${money(state.cashflow?.leftover_fees_cents)}</h2></article>`);
@@ -201,17 +247,17 @@ function renderCashflow(){
         const sale=state.cashflow?.sales?.[index];
         if(sale?.leftover_fee_cents)row.querySelector('span')?.insertAdjacentHTML('beforeend',` · Leftover fee ${money(sale.leftover_fee_cents)} · Total collected ${money(sale.collected_total_cents)}`);
     });
-}
+};
 
-const baseLoadCashflow=loadCashflow;
-async function loadCashflow(){
+const baseLoadCashflow=window.loadCashflow;
+window.loadCashflow=async function(){
     await baseLoadCashflow();
     const grid=[...document.querySelectorAll('#screen .panel')].find(panel=>panel.querySelector('h2')?.textContent.includes('Cash vs non-cash reconciliation'))?.querySelector('.grid');
     if(grid)grid.insertAdjacentHTML('beforeend',`<div><div class="muted">Cash leftover fees</div><strong>${money(state.cashflow?.cash_leftover_fees_cents)}</strong></div>`);
-}
+};
 
-const baseAddDeliveryFeeReportUi=addDeliveryFeeReportUi;
-function addDeliveryFeeReportUi(){
+const baseAddDeliveryFeeReportUi=window.addDeliveryFeeReportUi;
+window.addDeliveryFeeReportUi=function(){
     baseAddDeliveryFeeReportUi();
     const grid=document.querySelector('#screen .grid');
     if(grid)grid.insertAdjacentHTML('beforeend',`<article class="panel"><div class="muted">Leftover fees (separate)</div><h2>${money(state.report?.leftover_fees_cents)}</h2></article>`);
@@ -219,10 +265,10 @@ function addDeliveryFeeReportUi(){
         const transaction=state.report?.transactions?.[index];
         if(transaction?.leftover_fee_cents)row.querySelector('span')?.insertAdjacentHTML('beforeend',`<div class="muted">Leftover fee: ${money(transaction.leftover_fee_cents)}</div>`);
     });
-}
+};
 
-const baseBillout=billout;
-function billout(id,total){
+const baseBillout=window.billout;
+window.billout=function(id,total){
     if(state.pendingBillout)state.pendingBillout.leftoverFeeCents=0;
     baseBillout(id,total);
     const billTotal=document.querySelector('#modal-content .total');
@@ -230,7 +276,7 @@ function billout(id,total){
     updateBilloutTotal();
     const button=document.querySelector('#modal-content button[onclick="createBilloutReceipt()"]');
     if(button){button.textContent='Confirm order';button.insertAdjacentHTML('afterend',' <button class="btn secondary" onclick="cancelBillout()">Cancel</button>')}
-}
+};
 
 function cancelBillout(){state.pendingBillout=null;closeModal()}
 
@@ -287,5 +333,5 @@ async function confirmRound(id,button){
 }
 
 const touchStyles=document.createElement('style');
-touchStyles.textContent='@media (hover:none){.category-card:hover{border-color:var(--line);transform:none} .btn:hover{background:var(--red)} aside button:hover{background:transparent;color:#4d535c}} .qty button{min-width:44px;min-height:44px;touch-action:manipulation} #flavor-allocations .allocation{min-height:48px} button{touch-action:manipulation} .order-row{gap:14px}';
+touchStyles.textContent='@media (hover:none){.category-card:hover{border-color:var(--line);transform:none} .btn:hover{background:var(--red)} aside button:hover{background:transparent;color:#4d535c}} .qty button,.round-quantity-controls button,.paid-set-controls button{min-width:48px;min-height:48px;touch-action:manipulation} #flavor-allocations .allocation{min-height:48px} button{touch-action:manipulation} .order-row{gap:14px} .pos-category-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;max-width:900px;margin:0 auto} .pos-category-grid .category-card{height:clamp(155px,22vw,220px);display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:10px;padding:clamp(18px,3vw,32px);border-radius:20px;background:linear-gradient(145deg,#fff 55%,#fff1f1);box-shadow:0 10px 28px #282f3b0d} .pos-category-grid .category-card:nth-child(2){background:linear-gradient(145deg,#fff 55%,#fff7e8)} .pos-category-grid .category-card:nth-child(3){background:linear-gradient(145deg,#fff 55%,#eef6ff)} .pos-category-grid .category-card:nth-child(4){background:linear-gradient(145deg,#fff 55%,#f0f8ef)} .pos-category-grid .category-card .icon{font-size:38px;margin:0} .pos-category-grid .category-card strong{font-size:20px;letter-spacing:.04em} .pos-category-grid .category-card span{font-size:13px} #round-flavors .allocation{grid-template-columns:22px minmax(0,1fr) auto} .round-quantity-controls,.paid-set-controls{display:flex;align-items:center;gap:8px} .round-quantity-controls input[type=number],.paid-set-controls input[type=number]{width:72px;min-height:48px;text-align:center} .paid-set-controls{justify-content:center;margin-top:6px} #modal-content .detail-line>span:first-child{white-space:pre-line} @media(max-width:560px){.pos-category-grid{gap:10px}.pos-category-grid .category-card{height:150px;padding:16px;border-radius:15px}.pos-category-grid .category-card .icon{font-size:32px}.pos-category-grid .category-card strong{font-size:16px}.pos-category-grid .category-card span{font-size:11px}}';
 document.head.append(touchStyles);
