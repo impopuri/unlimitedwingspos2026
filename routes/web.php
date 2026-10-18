@@ -52,6 +52,8 @@ Route::prefix('posetivacwingspos')->group(function (): void {
         Route::post('/api/admin/accounts', [AdminOperationsController::class, 'createAccount'])->middleware('role:superadmin')->name('pos.admin.accounts.create');
         Route::patch('/api/admin/accounts/{user}', [AdminOperationsController::class, 'updateAccount'])->middleware('role:superadmin')->name('pos.admin.accounts.update');
         Route::get('/api/kitchen', [PosController::class, 'kitchen'])->middleware('role:superadmin,kitchen')->name('pos.kitchen');
+        Route::get('/api/orders', [PosController::class, 'orders'])->middleware('role:superadmin,cashier')->name('pos.orders');
+        Route::post('/api/orders/{order}/payment', [PosController::class, 'payOrder'])->middleware('role:superadmin,cashier')->name('pos.orders.payment');
         Route::get('/api/receipts/{order}', [PosController::class, 'receipt'])->name('pos.receipt');
         Route::post('/api/orders', [PosController::class, 'checkout'])->middleware('role:superadmin,cashier')->name('pos.checkout');
         Route::post('/api/orders/{order}/void-requests', [AdminOperationsController::class, 'requestVoid'])->middleware('role:superadmin,cashier')->name('pos.orders.void.request');

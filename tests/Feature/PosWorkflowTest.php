@@ -53,6 +53,46 @@ class PosWorkflowTest extends TestCase
         $this->assertSame(1, DB::table('inventory_movements')->count());
     }
 
+    public function test_confirmed_order_waits_for_payment_until_selected_from_orders(): void
+    {
+        $cashier = User::where('role', 'cashier')->firstOrFail();
+        $productId = DB::table('products')->where('sku', 'MEAL-2')->value('id');
+        $flavorId = DB::table('flavors')->where('name', 'Buffalo')->value('id');
+
+        $response = $this->actingAs($cashier)->postJson('/posetivacwingspos/api/orders', [
+            'idempotency_key' => '5690ed9e-0271-484a-a8b8-191669405f14',
+            'type' => 'takeaway',
+            'items' => [[
+                'product_id' => $productId,
+                'quantity' => 1,
+                'flavors' => [['flavor_id' => $flavorId, 'quantity' => 1]],
+            ]],
+        ])->assertCreated()
+            ->assertJsonPath('receipt.status', 'awaiting_payment')
+            ->assertJsonPath('receipt.payment_method', 'pending')
+            ->assertJsonPath('receipt.amount_paid_cents', 0);
+
+        $orderId = $response->json('receipt.id');
+        $this->getJson('/posetivacwingspos/api/orders')
+            ->assertOk()
+            ->assertJsonPath('orders.0.id', $orderId)
+            ->assertJsonPath('orders.0.status', 'awaiting_payment');
+
+        $this->postJson("/posetivacwingspos/api/orders/{$orderId}/payment", [
+            'payment_method' => 'cash',
+            'amount_paid_cents' => 1,
+        ])->assertUnprocessable()->assertJsonValidationErrors(['amount_paid_cents']);
+        $this->assertDatabaseHas('orders', ['id' => $orderId, 'status' => 'awaiting_payment']);
+
+        $this->postJson("/posetivacwingspos/api/orders/{$orderId}/payment", [
+            'payment_method' => 'cash',
+            'amount_paid_cents' => 10000,
+        ])->assertOk()
+            ->assertJsonPath('receipt.status', 'paid')
+            ->assertJsonPath('receipt.payment_method', 'cash')
+            ->assertJsonPath('receipt.change_cents', 100);
+    }
+
     public function test_meal_platter_and_bilao_flavor_quantities_are_per_order(): void
     {
         $cashier = User::where('role', 'cashier')->firstOrFail();
@@ -213,8 +253,8 @@ class PosWorkflowTest extends TestCase
             ->assertJsonPath('collected_total_cents', 9920)
             ->assertJsonPath('net_cents', 9920);
         $csv = $this->get('/posetivacwingspos/api/admin/sales.csv?type=delivery')->assertOk()->streamedContent();
-        $this->assertStringContainsString('Sales PHP,Delivery fee PHP,Total collected PHP', $csv);
-        $this->assertStringContainsString('79.20,20.00,99.20', $csv);
+        $this->assertStringContainsString('Sales PHP,Delivery fee PHP,Leftover fee PHP,Total collected PHP', $csv);
+        $this->assertStringContainsString('79.20,20.00,0.00,99.20', $csv);
     }
 
     public function test_delivery_location_is_required_for_delivery_orders(): void
@@ -320,6 +360,50 @@ class PosWorkflowTest extends TestCase
         $this->assertSame('Unlimited drinks', $receipt->json('receipt.rounds.0.included_items.1'));
         $this->assertSame(3, $receipt->json('receipt.rounds.0.included_quantities.Unlimited drinks'));
         $this->actingAs($cashier)->get('/posetivacwingspos/app')->assertOk()->assertSee('EWLOGO.png');
+    }
+
+    public function test_unli_billout_optional_leftover_fee_is_saved_and_reported_separately(): void
+    {
+        $cashier = User::where('role', 'cashier')->firstOrFail();
+        $admin = User::where('role', 'superadmin')->firstOrFail();
+        $tableId = DB::table('dining_tables')->where('label', 'Table 1')->value('id');
+        $package = DB::table('products')->where('sku', 'UNLI-C')->firstOrFail();
+        $session = $this->actingAs($cashier)->postJson('/posetivacwingspos/api/unli-sessions', [
+            'table_id' => $tableId,
+            'package_id' => $package->id,
+            'paid_sets' => 1,
+        ])->assertCreated()->json('session');
+
+        $leftoverFee = 1500;
+        $order = $this->postJson("/posetivacwingspos/api/unli-sessions/{$session['id']}/billout", [
+            'idempotency_key' => 'd3b92172-f016-4703-8648-b3dce17c3d48',
+            'leftover_fee_cents' => $leftoverFee,
+        ])->assertCreated()
+            ->assertJsonPath('receipt.status', 'awaiting_payment')
+            ->assertJsonPath('receipt.leftover_fee_cents', $leftoverFee)
+            ->assertJsonPath('receipt.total_cents', $package->price_cents + $leftoverFee);
+
+        $orderId = $order->json('receipt.id');
+        $this->postJson("/posetivacwingspos/api/orders/{$orderId}/payment", [
+            'payment_method' => 'cash',
+            'amount_paid_cents' => $package->price_cents + $leftoverFee,
+        ])->assertOk()
+            ->assertJsonPath('receipt.status', 'paid')
+            ->assertJsonPath('receipt.leftover_fee_cents', $leftoverFee);
+
+        $this->actingAs($admin)->getJson('/posetivacwingspos/api/admin/sales-report')
+            ->assertOk()
+            ->assertJsonPath('leftover_fees_cents', $leftoverFee)
+            ->assertJsonPath('transactions.0.leftover_fee_cents', $leftoverFee);
+        $this->getJson('/posetivacwingspos/api/admin/cashflow')
+            ->assertOk()
+            ->assertJsonPath('leftover_fees_cents', $leftoverFee)
+            ->assertJsonPath('cash_leftover_fees_cents', $leftoverFee)
+            ->assertJsonPath('collected_total_cents', $package->price_cents + $leftoverFee);
+
+        $csv = $this->get('/posetivacwingspos/api/admin/sales.csv?type=unliwings')->assertOk()->streamedContent();
+        $this->assertStringContainsString('Delivery fee PHP,Leftover fee PHP,Total collected PHP', $csv);
+        $this->assertStringContainsString(',0.00,15.00,'.number_format(($package->price_cents + $leftoverFee) / 100, 2, '.', ''), $csv);
     }
 
     public function test_unli_side_requests_follow_set_inclusions_and_show_on_kitchen_and_receipt(): void
@@ -612,6 +696,10 @@ class PosWorkflowTest extends TestCase
             'header' => 'Welcome',
             'footer' => 'Scan our survey',
         ])->assertOk();
+        $this->getJson('/posetivacwingspos/api/bootstrap')
+            ->assertOk()
+            ->assertJsonPath('receipt.header', 'Welcome')
+            ->assertJsonPath('receipt.footer', 'Scan our survey');
 
         $temporaryImage = tempnam(sys_get_temp_dir(), 'survey-qr-');
         copy(public_path('images/EWlogo.jpg'), $temporaryImage);

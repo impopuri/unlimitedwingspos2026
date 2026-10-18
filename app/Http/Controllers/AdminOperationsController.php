@@ -125,8 +125,8 @@ class AdminOperationsController extends Controller
             ->orderByDesc('orders.created_at')
             ->get([
                 'orders.id', 'orders.order_number', 'orders.type', 'orders.payment_method',
-                DB::raw('(orders.total_cents - orders.delivery_fee_cents) as amount_cents'),
-                'orders.delivery_fee_cents', 'orders.total_cents as collected_total_cents',
+                DB::raw('(orders.total_cents - orders.delivery_fee_cents - orders.leftover_fee_cents) as amount_cents'),
+                'orders.delivery_fee_cents', 'orders.leftover_fee_cents', 'orders.total_cents as collected_total_cents',
                 'orders.created_at as occurred_at',
                 'users.username as recorded_by',
             ]);
@@ -144,11 +144,13 @@ class AdminOperationsController extends Controller
 
         $salesTotal = (int) $sales->sum('amount_cents');
         $deliveryFees = (int) $sales->sum('delivery_fee_cents');
+        $leftoverFees = (int) $sales->sum('leftover_fee_cents');
         $expensesTotal = (int) $expenses->sum('amount_cents');
         $cashOrders = DB::table('orders')->whereIn('status', ['paid', 'partially_refunded', 'refunded'])->where('payment_method', 'cash')
             ->whereDate('created_at', '>=', $from)->whereDate('created_at', '<=', $to);
-        $cashSales = (int) (clone $cashOrders)->sum(DB::raw('total_cents - delivery_fee_cents'));
+        $cashSales = (int) (clone $cashOrders)->sum(DB::raw('total_cents - delivery_fee_cents - leftover_fee_cents'));
         $cashDeliveryFees = (int) (clone $cashOrders)->sum('delivery_fee_cents');
+        $cashLeftoverFees = (int) (clone $cashOrders)->sum('leftover_fee_cents');
         $cashExpenses = (int) DB::table('expenses')->where('voided', false)->where('paid_with', 'cash')
             ->whereDate('spent_at', '>=', $from)->whereDate('spent_at', '<=', $to)->sum('amount_cents');
         $cashRefunds = (int) DB::table('refunds')->where('status', 'approved')->where('payment_method', 'cash')
@@ -182,12 +184,14 @@ class AdminOperationsController extends Controller
             'expenses' => $expenses,
             'sales_total_cents' => $salesTotal,
             'expenses_total_cents' => $expensesTotal,
-            'net_cents' => $salesTotal + $deliveryFees - $expensesTotal - $refundsTotal,
+            'net_cents' => $salesTotal + $deliveryFees + $leftoverFees - $expensesTotal - $refundsTotal,
             'cash_sales_cents' => $cashSales,
             'non_cash_sales_cents' => $salesTotal - $cashSales,
             'delivery_fees_cents' => $deliveryFees,
             'cash_delivery_fees_cents' => $cashDeliveryFees,
-            'collected_total_cents' => $salesTotal + $deliveryFees,
+            'leftover_fees_cents' => $leftoverFees,
+            'cash_leftover_fees_cents' => $cashLeftoverFees,
+            'collected_total_cents' => $salesTotal + $deliveryFees + $leftoverFees,
             'cash_expenses_cents' => $cashExpenses,
             'cash_refunds_cents' => $cashRefunds,
             'refunds_total_cents' => $refundsTotal,
@@ -547,7 +551,7 @@ class AdminOperationsController extends Controller
             ->orderBy('orders.created_at')
             ->get([
                 'orders.order_number', 'orders.type', 'orders.status', 'orders.payment_method',
-                'orders.total_cents', 'orders.delivery_fee_cents', 'orders.created_at', 'users.username',
+                'orders.total_cents', 'orders.delivery_fee_cents', 'orders.leftover_fee_cents', 'orders.created_at', 'users.username',
             ]);
 
         return response()->streamDownload(function () use ($sales): void {
@@ -556,15 +560,16 @@ class AdminOperationsController extends Controller
                 throw new \RuntimeException('Unable to create the sales CSV stream.');
             }
 
-            fwrite($output, "Order number,Type,Status,Payment method,Sales PHP,Delivery fee PHP,Total collected PHP,Date,Cashier\n");
+            fwrite($output, "Order number,Type,Status,Payment method,Sales PHP,Delivery fee PHP,Leftover fee PHP,Total collected PHP,Date,Cashier\n");
             foreach ($sales as $sale) {
                 fwrite($output, implode(',', [
                     $sale->order_number,
                     $sale->type,
                     $sale->status,
                     $sale->payment_method,
-                    number_format(($sale->total_cents - $sale->delivery_fee_cents) / 100, 2, '.', ''),
+                    number_format(($sale->total_cents - $sale->delivery_fee_cents - $sale->leftover_fee_cents) / 100, 2, '.', ''),
                     number_format($sale->delivery_fee_cents / 100, 2, '.', ''),
+                    number_format($sale->leftover_fee_cents / 100, 2, '.', ''),
                     number_format($sale->total_cents / 100, 2, '.', ''),
                     $sale->created_at,
                     $sale->username,
@@ -618,7 +623,7 @@ class AdminOperationsController extends Controller
             ->limit(300)
             ->get([
                 'orders.id', 'orders.order_number', 'orders.type', 'orders.status',
-                'orders.subtotal_cents', 'orders.discount_cents', 'orders.delivery_fee_cents', 'orders.promotion_name',
+                'orders.subtotal_cents', 'orders.discount_cents', 'orders.delivery_fee_cents', 'orders.leftover_fee_cents', 'orders.promotion_name',
                 'orders.promotion_free_customers', 'orders.promotion_savings_cents', 'orders.total_cents',
                 'orders.payment_method', 'orders.created_at', 'users.username as cashier',
             ]);
@@ -629,6 +634,7 @@ class AdminOperationsController extends Controller
         $discounts = (int) (clone $orders)->whereIn('status', ['paid', 'refunded', 'partially_refunded'])->sum('discount_cents');
         $promotionSavings = (int) (clone $orders)->whereIn('status', ['paid', 'refunded', 'partially_refunded'])->sum('promotion_savings_cents');
         $deliveryFees = (int) (clone $orders)->whereIn('status', ['paid', 'refunded', 'partially_refunded'])->sum('delivery_fee_cents');
+        $leftoverFees = (int) (clone $orders)->whereIn('status', ['paid', 'refunded', 'partially_refunded'])->sum('leftover_fee_cents');
         $net = $gross - $promotionSavings - $discounts - $refunds;
         $completedCount = (int) (clone $orders)->whereIn('status', ['paid', 'refunded', 'partially_refunded'])->count();
         $promotionUsage = (clone $orders)
@@ -677,16 +683,16 @@ class AdminOperationsController extends Controller
             ]);
         $byCashier = DB::table('orders')->join('users', 'users.id', '=', 'orders.cashier_id')
             ->whereIn('orders.id', $orderIds)->whereIn('orders.status', ['paid', 'partially_refunded', 'refunded'])
-            ->groupBy('users.username')->orderByDesc(DB::raw('SUM(orders.total_cents - orders.delivery_fee_cents)'))
-            ->get(['users.username', DB::raw('SUM(orders.total_cents - orders.delivery_fee_cents) as sales_cents')]);
+            ->groupBy('users.username')->orderByDesc(DB::raw('SUM(orders.total_cents - orders.delivery_fee_cents - orders.leftover_fee_cents)'))
+            ->get(['users.username', DB::raw('SUM(orders.total_cents - orders.delivery_fee_cents - orders.leftover_fee_cents) as sales_cents')]);
         $byType = DB::table('orders')->whereIn('id', $orderIds)->whereIn('status', ['paid', 'partially_refunded', 'refunded'])
-            ->groupBy('type')->orderByDesc(DB::raw('SUM(total_cents - delivery_fee_cents)'))
-            ->get(['type', DB::raw('SUM(total_cents - delivery_fee_cents) as sales_cents')]);
+            ->groupBy('type')->orderByDesc(DB::raw('SUM(total_cents - delivery_fee_cents - leftover_fee_cents)'))
+            ->get(['type', DB::raw('SUM(total_cents - delivery_fee_cents - leftover_fee_cents) as sales_cents')]);
         $byHour = DB::table('orders')->whereIn('id', $orderIds)->whereIn('status', ['paid', 'partially_refunded', 'refunded'])
-            ->selectRaw("strftime('%H', created_at) as hour, SUM(total_cents - delivery_fee_cents) as sales_cents")
+            ->selectRaw("strftime('%H', created_at) as hour, SUM(total_cents - delivery_fee_cents - leftover_fee_cents) as sales_cents")
             ->groupBy('hour')->orderBy('hour')->get();
         $byDay = DB::table('orders')->whereIn('id', $orderIds)->whereIn('status', ['paid', 'partially_refunded', 'refunded'])
-            ->selectRaw('date(created_at) as day, SUM(total_cents - delivery_fee_cents) as sales_cents')
+            ->selectRaw('date(created_at) as day, SUM(total_cents - delivery_fee_cents - leftover_fee_cents) as sales_cents')
             ->groupBy('day')->orderBy('day')->get();
 
         return response()->json([
@@ -697,6 +703,7 @@ class AdminOperationsController extends Controller
             'discounts_cents' => $discounts,
             'promotion_savings_cents' => $promotionSavings,
             'delivery_fees_cents' => $deliveryFees,
+            'leftover_fees_cents' => $leftoverFees,
             'promotion_usage' => $promotionUsage,
             'voids_cents' => $voided,
             'refunds_cents' => $refunds,
@@ -1092,6 +1099,7 @@ class AdminOperationsController extends Controller
     {
         $orders = DB::table('orders')
             ->join('users', 'users.id', '=', 'orders.cashier_id')
+            ->where('orders.status', '!=', 'awaiting_payment')
             ->when($request->user()->role !== 'superadmin', fn ($query) => $query->where('orders.cashier_id', $request->user()->id))
             ->orderByDesc('orders.created_at')
             ->limit(100)

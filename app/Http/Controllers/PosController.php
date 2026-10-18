@@ -132,8 +132,8 @@ class PosController extends Controller
         $data = $request->validate([
             'idempotency_key' => ['required', 'uuid'],
             'type' => ['required', 'in:dine_in,takeaway,delivery'],
-            'payment_method' => ['required', 'in:cash,gcash,maribank,maya,others'],
-            'amount_paid_cents' => ['required', 'integer', 'min:0'],
+            'payment_method' => ['nullable', 'required_with:amount_paid_cents', 'in:cash,gcash,maribank,maya,others'],
+            'amount_paid_cents' => ['nullable', 'required_with:payment_method', 'integer', 'min:0'],
             'delivery_fee_cents' => ['required_if:type,delivery', 'nullable', 'integer', 'min:0', 'max:999999999'],
             'delivery_location' => ['required_if:type,delivery', 'nullable', 'string', 'max:255'],
             'discount_type' => ['required', 'in:none,pwd,senior,other'],
@@ -196,16 +196,17 @@ class PosController extends Controller
         $discountCents = (int) round($subtotal * $discountRateBasisPoints / 10000);
         $deliveryFeeCents = $data['type'] === 'delivery' ? (int) ($data['delivery_fee_cents'] ?? 0) : 0;
         $total = $subtotal - $discountCents + $deliveryFeeCents;
-        if ($data['amount_paid_cents'] < $total) {
+        $isPaid = isset($data['payment_method'], $data['amount_paid_cents']);
+        if ($isPaid && $data['amount_paid_cents'] < $total) {
             throw ValidationException::withMessages(['amount_paid_cents' => 'The amount paid cannot be less than the order total.']);
         }
 
-        $orderId = DB::transaction(function () use ($data, $products, $totalWings, $subtotal, $total, $discountName, $discountRateBasisPoints, $discountCents, $deliveryFeeCents): int {
+        $orderId = DB::transaction(function () use ($data, $products, $totalWings, $subtotal, $total, $discountName, $discountRateBasisPoints, $discountCents, $deliveryFeeCents, $isPaid): int {
             $orderId = DB::table('orders')->insertGetId([
                 'order_number' => 'EW-'.now()->format('ymdHis').'-'.Str::upper(Str::random(4)),
                 'idempotency_key' => $data['idempotency_key'],
                 'type' => $data['type'],
-                'status' => 'paid',
+                'status' => $isPaid ? 'paid' : 'awaiting_payment',
                 'cashier_id' => auth()->id(),
                 'subtotal_cents' => $subtotal,
                 'discount_cents' => $discountCents,
@@ -214,9 +215,9 @@ class PosController extends Controller
                 'delivery_fee_cents' => $deliveryFeeCents,
                 'delivery_location' => $data['type'] === 'delivery' ? trim($data['delivery_location']) : null,
                 'total_cents' => $total,
-                'payment_method' => $data['payment_method'],
-                'amount_paid_cents' => $data['amount_paid_cents'],
-                'change_cents' => $data['amount_paid_cents'] - $total,
+                'payment_method' => $data['payment_method'] ?? 'pending',
+                'amount_paid_cents' => $data['amount_paid_cents'] ?? 0,
+                'change_cents' => $isPaid ? $data['amount_paid_cents'] - $total : 0,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -418,13 +419,14 @@ class PosController extends Controller
         $request->merge(['discount_type' => $request->input('discount_type', 'none')]);
         $data = $request->validate([
             'idempotency_key' => ['required', 'uuid'],
-            'payment_method' => ['required', 'in:cash,gcash,maribank,maya,others'],
-            'amount_paid_cents' => ['required', 'integer', 'min:0'],
+            'payment_method' => ['nullable', 'required_with:amount_paid_cents', 'in:cash,gcash,maribank,maya,others'],
+            'amount_paid_cents' => ['nullable', 'required_with:payment_method', 'integer', 'min:0'],
             'discount_type' => ['required', 'in:none,pwd,senior,other'],
             'discount_name' => ['nullable', 'required_if:discount_type,other', 'string', 'max:60'],
             'discount_rate' => ['nullable', 'required_if:discount_type,other', 'numeric', 'min:0', 'max:100'],
             'promotion_id' => ['nullable', 'integer', 'exists:promotions,id'],
             'promotion_free_customers' => ['nullable', 'integer', 'min:0', 'max:50'],
+            'leftover_fee_cents' => ['nullable', 'integer', 'min:0', 'max:999999999'],
             'extras' => ['sometimes', 'array'],
             'extras.*.product_id' => ['required', 'integer', 'exists:products,id'],
             'extras.*.quantity' => ['required', 'integer', 'min:1', 'max:99'],
@@ -435,7 +437,9 @@ class PosController extends Controller
         }
 
         [$discountName, $discountRateBasisPoints] = $this->discountValues($data);
-        $orderId = DB::transaction(function () use ($session, $data, $discountName, $discountRateBasisPoints): int {
+        $isPaid = isset($data['payment_method'], $data['amount_paid_cents']);
+        $leftoverFeeCents = (int) ($data['leftover_fee_cents'] ?? 0);
+        $orderId = DB::transaction(function () use ($session, $data, $discountName, $discountRateBasisPoints, $isPaid, $leftoverFeeCents): int {
             $active = DB::table('unli_sessions')->where('id', $session)->where('status', 'ongoing')->lockForUpdate()->first();
             if (! $active) {
                 throw ValidationException::withMessages(['session' => 'This table session is already closed.']);
@@ -478,8 +482,8 @@ class PosController extends Controller
             }
             $discountableSubtotal = $subtotal - $promotionSavingsCents;
             $discountCents = (int) round($discountableSubtotal * $discountRateBasisPoints / 10000);
-            $total = $discountableSubtotal - $discountCents;
-            if ($data['amount_paid_cents'] < $total) {
+            $total = $discountableSubtotal - $discountCents + $leftoverFeeCents;
+            if ($isPaid && $data['amount_paid_cents'] < $total) {
                 throw ValidationException::withMessages(['amount_paid_cents' => 'The amount paid cannot be less than the bill total.']);
             }
 
@@ -487,7 +491,7 @@ class PosController extends Controller
                 'order_number' => 'EW-'.now()->format('ymdHis').'-'.Str::upper(Str::random(4)),
                 'idempotency_key' => $data['idempotency_key'],
                 'type' => 'unliwings',
-                'status' => 'paid',
+                'status' => $isPaid ? 'paid' : 'awaiting_payment',
                 'cashier_id' => auth()->id(),
                 'dining_table_id' => $active->dining_table_id,
                 'unli_session_id' => $active->id,
@@ -503,10 +507,11 @@ class PosController extends Controller
                 'promotion_free_customers_per_group' => $promotion?->free_customers_per_group,
                 'promotion_free_customers' => $promotionFreeCustomers,
                 'promotion_savings_cents' => $promotionSavingsCents,
+                'leftover_fee_cents' => $leftoverFeeCents,
                 'total_cents' => $total,
-                'payment_method' => $data['payment_method'],
-                'amount_paid_cents' => $data['amount_paid_cents'],
-                'change_cents' => $data['amount_paid_cents'] - $total,
+                'payment_method' => $data['payment_method'] ?? 'pending',
+                'amount_paid_cents' => $data['amount_paid_cents'] ?? 0,
+                'change_cents' => $isPaid ? $data['amount_paid_cents'] - $total : 0,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -542,7 +547,12 @@ class PosController extends Controller
                 'closed_at' => now(),
                 'updated_at' => now(),
             ]);
-            $this->audit('unli.billout', 'order', $orderId, ['total_cents' => $total, 'discount_cents' => $discountCents, 'session_id' => $active->id]);
+            $this->audit('unli.billout', 'order', $orderId, [
+                'total_cents' => $total,
+                'discount_cents' => $discountCents,
+                'leftover_fee_cents' => $leftoverFeeCents,
+                'session_id' => $active->id,
+            ]);
 
             return $orderId;
         });
@@ -655,6 +665,59 @@ class PosController extends Controller
     public function receipt(int $order): JsonResponse
     {
         abort_unless(DB::table('orders')->where('id', $order)->exists(), 404);
+
+        return $this->receiptResponse($order);
+    }
+
+    public function orders(): JsonResponse
+    {
+        $columns = [
+            'orders.id', 'orders.order_number', 'orders.type', 'orders.status',
+            'orders.total_cents', 'orders.created_at', 'users.name as cashier_name',
+        ];
+        $pendingOrders = DB::table('orders')
+            ->join('users', 'users.id', '=', 'orders.cashier_id')
+            ->where('orders.status', 'awaiting_payment')
+            ->orderBy('orders.created_at')
+            ->get($columns);
+        $recentOrders = DB::table('orders')
+            ->join('users', 'users.id', '=', 'orders.cashier_id')
+            ->where('orders.status', '!=', 'awaiting_payment')
+            ->orderByDesc('orders.created_at')
+            ->limit(100)
+            ->get($columns);
+
+        return response()->json(['orders' => $pendingOrders->concat($recentOrders)->values()]);
+    }
+
+    public function payOrder(Request $request, int $order): JsonResponse
+    {
+        $data = $request->validate([
+            'payment_method' => ['required', 'in:cash,gcash,maribank,maya,others'],
+            'amount_paid_cents' => ['required', 'integer', 'min:0'],
+        ]);
+
+        DB::transaction(function () use ($request, $order, $data): void {
+            $pendingOrder = DB::table('orders')->where('id', $order)->lockForUpdate()->first();
+            if (! $pendingOrder || $pendingOrder->status !== 'awaiting_payment') {
+                throw ValidationException::withMessages(['order' => 'This order is no longer awaiting payment. Refresh the orders list.']);
+            }
+            if ($data['amount_paid_cents'] < $pendingOrder->total_cents) {
+                throw ValidationException::withMessages(['amount_paid_cents' => 'The amount paid cannot be less than the order total.']);
+            }
+
+            DB::table('orders')->where('id', $order)->update([
+                'status' => 'paid',
+                'payment_method' => $data['payment_method'],
+                'amount_paid_cents' => $data['amount_paid_cents'],
+                'change_cents' => $data['amount_paid_cents'] - $pendingOrder->total_cents,
+                'updated_at' => now(),
+            ]);
+            $this->audit('order.payment_received', 'order', $order, [
+                'total_cents' => $pendingOrder->total_cents,
+                'payment_method' => $data['payment_method'],
+            ]);
+        });
 
         return $this->receiptResponse($order);
     }
